@@ -1,0 +1,6 @@
+{
+  "name": "SMILE MAILER",
+  "description": "Professional enterprise email composer with rotational SMTP pooling, live company website impressum crawler, Schema.org phone & address parsing, and automated country-based email translation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
