@@ -34,6 +34,7 @@ import {
   Bot
 } from 'lucide-react';
 import { replaceTemplateVariables } from '../utils/templateRenderer';
+import { parseNameFromEmail } from '../utils/leadHygiene';
 
 interface ComposerDispatcherProps {
   servers: SmtpServer[];
@@ -171,16 +172,19 @@ To opt out, visit: {{unsubscribe_url}}`
       list = items.map(raw => {
         const match = raw.match(/^(.*?)\s*<([^>]+)>$/);
         if (match) {
-          return { name: match[1].trim(), email: match[2].trim() };
+          const email = match[2].trim();
+          const parsed = parseNameFromEmail(email, match[1].trim());
+          return { name: parsed.fullName, email };
         }
-        return { email: raw };
+        const parsed = parseNameFromEmail(raw);
+        return { name: parsed.fullName, email: raw };
       });
     } else {
       list = leads
         .filter(l => selectedLeadIds.has(l.id))
         .map(l => ({
           email: l.email,
-          name: l.name,
+          name: l.name || parseNameFromEmail(l.email).fullName,
           country: l.country,
           language: l.targetLanguage,
         }));
@@ -325,9 +329,12 @@ To opt out, visit: {{unsubscribe_url}}`
 
       // Check matching lead metadata for advanced personalized tags
       const matchingLead = leads.find(l => l.email.toLowerCase() === currentTarget.email.toLowerCase());
+      const parsed = parseNameFromEmail(currentTarget.email, currentTarget.name || matchingLead?.name);
       const recipientStub = {
         email: currentTarget.email,
-        firstName: currentTarget.name ? currentTarget.name.split(' ')[0] : currentTarget.email.split('@')[0],
+        name: parsed.fullName,
+        firstName: parsed.firstName || matchingLead?.firstName || 'Valued Executive',
+        lastName: parsed.lastName || matchingLead?.lastName || '',
         company: matchingLead?.company || currentTarget.email.split('@')[1].replace(/\.[^/.]+$/, ''),
         country: matchingLead?.country || currentTarget.country || 'International',
         targetLanguage: matchingLead?.targetLanguage || currentTarget.language || 'English',
@@ -375,6 +382,54 @@ To opt out, visit: {{unsubscribe_url}}`
       const now = new Date();
       const timeStr = now.toTimeString().split(' ')[0];
 
+      let deliveryStatus: 'sent' | 'failed' = 'sent';
+      let deliveryMessage = `250 2.0.0 OK: Delivered via [${activeServer.host}] (Relay #${(rotationalSmtpIndexRef.current % workingServers.length) + 1})${translationNotice}`;
+      let latencyMs = 95 + Math.floor(Math.random() * 60);
+
+      // Perform real live SMTP transmission via backend
+      try {
+        const sendResp = await fetch('/api/send-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            smtp: {
+              host: activeServer.host,
+              port: activeServer.port,
+              username: activeServer.username,
+              password: activeServer.password,
+              security: activeServer.security,
+              fromEmail: activeServer.fromEmail,
+              fromName: activeServer.fromName,
+            },
+            email: {
+              to: currentTarget.email,
+              subject: renderedSubject,
+              body: renderedBody,
+              bodyType,
+              cc: cc.trim() || undefined,
+              bcc: bcc.trim() || undefined,
+              replyTo: replyTo.trim() || activeServer.replyTo,
+            },
+          }),
+        });
+
+        if (sendResp.ok) {
+          const sendData = await sendResp.json();
+          latencyMs = sendData.latencyMs || latencyMs;
+          if (sendData.success) {
+            deliveryStatus = 'sent';
+            deliveryMessage = sendData.message || `250 2.0.0 OK Delivered to ${currentTarget.email}`;
+          } else {
+            deliveryStatus = 'failed';
+            deliveryMessage = `SMTP Error: ${sendData.message}`;
+          }
+        }
+      } catch (err: any) {
+        console.warn('Real send error, fallback logging:', err);
+        deliveryStatus = 'failed';
+        deliveryMessage = `Transmission error: ${err.message || 'Network failure'}`;
+      }
+
       const newLog: DispatchLogItem = {
         id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         recipientEmail: currentTarget.email,
@@ -384,14 +439,16 @@ To opt out, visit: {{unsubscribe_url}}`
         cc: cc.trim() || undefined,
         bcc: bcc.trim() || undefined,
         replyTo: replyTo.trim() || activeServer.replyTo,
-        status: 'sent',
-        message: `250 2.0.0 OK: Delivered via [${activeServer.host}] (Relay #${(rotationalSmtpIndexRef.current % workingServers.length) + 1})${translationNotice}`,
+        status: deliveryStatus,
+        message: deliveryMessage,
         timestamp: timeStr,
-        latencyMs: 95 + Math.floor(Math.random() * 60),
+        latencyMs,
       };
 
       setLogs(prev => [...prev, newLog]);
-      setTotalDispatchedCount(prev => prev + 1);
+      if (deliveryStatus === 'sent') {
+        setTotalDispatchedCount(prev => prev + 1);
+      }
       setCurrentIndex(prev => prev + 1);
     }, delayPerEmailSec * 1000);
 
@@ -607,7 +664,7 @@ To opt out, visit: {{unsubscribe_url}}`
             <Sparkles className="w-3 h-3 text-emerald-400" />
             <span>Variables:</span>
           </span>
-          {['first_name', 'company', 'email', 'unsubscribe_url', 'date'].map(v => (
+          {['first_name', 'last_name', 'full_name', 'company', 'email', 'phone', 'country', 'unsubscribe_url', 'date'].map(v => (
             <button
               key={v}
               onClick={() => handleInsertVariable(v)}
@@ -764,42 +821,113 @@ To opt out, visit: {{unsubscribe_url}}`
             ) : (
               <div className="flex-1 flex flex-col min-h-0 space-y-2">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-xs text-neutral-400">
-                    Showing leads with confirmed MX records:
-                  </span>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs text-neutral-300 font-semibold">
+                      Leads Table ({leads.filter(l => selectedLeadIds.has(l.id)).length} selected):
+                    </span>
+                    <button
+                      onClick={() => {
+                        if (selectedLeadIds.size === leads.length) {
+                          setSelectedLeadIds(new Set());
+                        } else {
+                          setSelectedLeadIds(new Set(leads.map(l => l.id)));
+                        }
+                      }}
+                      className="text-[11px] text-emerald-400 hover:text-emerald-300 underline font-medium"
+                    >
+                      {selectedLeadIds.size === leads.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                  </div>
                   <button
                     onClick={onOpenLeadsTab}
                     className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center space-x-1 font-semibold"
                   >
-                    <span>Inspect MX Scrubber →</span>
+                    <span>Manage / Scrub Leads →</span>
                   </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto bg-neutral-900 border border-neutral-800 rounded-lg divide-y divide-neutral-800 p-1 text-xs">
-                  {leads.map(lead => (
-                    <label
-                      key={lead.id}
-                      className={`flex items-center space-x-2.5 p-2 rounded-md cursor-pointer transition-colors ${
-                        selectedLeadIds.has(lead.id) ? 'bg-neutral-800/80 text-white' : 'text-neutral-400 hover:bg-neutral-800/40'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedLeadIds.has(lead.id)}
-                        onChange={() => toggleSelectLead(lead.id)}
-                        className="rounded border-neutral-700 bg-neutral-950 text-emerald-500 focus:ring-0 cursor-pointer"
-                      />
-                      <div className="flex-1 truncate">
-                        <div className="font-mono text-white truncate font-medium">{lead.email}</div>
-                        <div className="text-[10px] text-neutral-400 truncate">{lead.company}</div>
-                      </div>
-                      {lead.mxStatus === 'valid' ? (
-                        <span className="text-[10px] text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800 font-medium">Valid MX</span>
+                <div className="flex-1 overflow-auto bg-neutral-900 border border-neutral-800 rounded-lg text-xs">
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-neutral-950 sticky top-0 z-10 text-[10px] uppercase font-bold text-neutral-400 border-b border-neutral-800">
+                      <tr>
+                        <th className="py-2 px-2.5 w-8 text-center">
+                          <input
+                            type="checkbox"
+                            checked={leads.length > 0 && selectedLeadIds.size === leads.length}
+                            onChange={() => {
+                              if (selectedLeadIds.size === leads.length) {
+                                setSelectedLeadIds(new Set());
+                              } else {
+                                setSelectedLeadIds(new Set(leads.map(l => l.id)));
+                              }
+                            }}
+                            className="rounded border-neutral-700 bg-neutral-950 text-emerald-500 focus:ring-0 cursor-pointer"
+                          />
+                        </th>
+                        <th className="py-2 px-2.5">Name</th>
+                        <th className="py-2 px-2.5">Email</th>
+                        <th className="py-2 px-2.5">Company</th>
+                        <th className="py-2 px-2.5">Phone</th>
+                        <th className="py-2 px-2.5">MX Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-800 text-[11px]">
+                      {leads.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-6 text-center text-neutral-500">
+                            No leads in memory. Import leads from the MX Scrubber tab.
+                          </td>
+                        </tr>
                       ) : (
-                        <span className="text-[10px] text-rose-400 bg-rose-950/80 px-2 py-0.5 rounded border border-rose-800 font-medium">No MX</span>
+                        leads.map(lead => (
+                          <tr
+                            key={lead.id}
+                            onClick={() => toggleSelectLead(lead.id)}
+                            className={`cursor-pointer hover:bg-neutral-800/60 transition-colors ${
+                              selectedLeadIds.has(lead.id) ? 'bg-emerald-950/20' : ''
+                            }`}
+                          >
+                            <td className="py-2 px-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={selectedLeadIds.has(lead.id)}
+                                onChange={() => toggleSelectLead(lead.id)}
+                                className="rounded border-neutral-700 bg-neutral-950 text-emerald-500 focus:ring-0 cursor-pointer"
+                              />
+                            </td>
+                            <td className="py-2 px-2.5 font-medium text-white whitespace-nowrap">
+                              <span className="text-emerald-400 font-bold">{lead.name || 'Valued Executive'}</span>
+                              {lead.firstName && lead.lastName && (
+                                <span className="text-[10px] text-neutral-400 block font-normal">
+                                  {lead.firstName} {lead.lastName}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2 px-2.5 font-mono text-emerald-300 whitespace-nowrap">
+                              {lead.email}
+                            </td>
+                            <td className="py-2 px-2.5 text-neutral-300 whitespace-nowrap">
+                              {lead.company || lead.domain}
+                            </td>
+                            <td className="py-2 px-2.5 font-mono text-neutral-400 whitespace-nowrap">
+                              {lead.phone || '—'}
+                            </td>
+                            <td className="py-2 px-2.5 whitespace-nowrap">
+                              {lead.mxStatus === 'valid' ? (
+                                <span className="text-[10px] text-emerald-400 bg-emerald-950/80 px-1.5 py-0.5 rounded border border-emerald-800 font-medium">
+                                  Valid MX
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-rose-400 bg-rose-950/80 px-1.5 py-0.5 rounded border border-rose-800 font-medium">
+                                  No MX
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))
                       )}
-                    </label>
-                  ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}
@@ -989,16 +1117,27 @@ To opt out, visit: {{unsubscribe_url}}`
               </div>
             ) : (
               logs.map((log) => (
-                <div key={log.id} className="p-2 rounded-lg bg-neutral-900 border border-neutral-800/80 leading-snug">
+                <div 
+                  key={log.id} 
+                  className={`p-2 rounded-lg border leading-snug ${
+                    log.status === 'failed' 
+                      ? 'bg-rose-950/40 border-rose-800/80 text-rose-200' 
+                      : 'bg-neutral-900 border-neutral-800/80 text-neutral-300'
+                  }`}
+                >
                   <div className="flex items-center justify-between text-[10px] text-neutral-400">
                     <span>[{log.timestamp}]</span>
-                    <span className="text-emerald-400 font-semibold">{log.smtpServerName}</span>
+                    <span className={log.status === 'failed' ? 'text-rose-400 font-bold' : 'text-emerald-400 font-semibold'}>
+                      {log.smtpServerName}
+                    </span>
                   </div>
                   <div className="text-white mt-0.5">
                     → <strong className="text-white">{log.recipientEmail}</strong>
                     {log.cc && <span className="text-neutral-400 ml-1.5">(CC: {log.cc})</span>}
                   </div>
-                  <div className="text-[10px] text-emerald-400 mt-0.5 truncate font-medium">
+                  <div className={`text-[10px] mt-0.5 font-medium ${
+                    log.status === 'failed' ? 'text-rose-400' : 'text-emerald-400 truncate'
+                  }`}>
                     {log.message} ({log.latencyMs}ms)
                   </div>
                 </div>

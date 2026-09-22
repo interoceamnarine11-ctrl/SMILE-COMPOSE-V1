@@ -54,18 +54,40 @@ export function parseBulkSmtpInput(rawText: string): { valid: SmtpServer[]; erro
 }
 
 export async function testSmtpConnection(server: SmtpServer): Promise<{ success: boolean; latencyMs: number; message: string }> {
-  // Realistic simulation of SMTP handshake and AUTH command
   const start = performance.now();
-  await new Promise(res => setTimeout(res, 350 + Math.random() * 400));
+  try {
+    const res = await fetch('/api/test-smtp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: server.host,
+        port: server.port,
+        username: server.username,
+        password: server.password,
+        security: server.security,
+      }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        success: data.success,
+        latencyMs: data.latencyMs || Math.round(performance.now() - start),
+        message: data.message || (data.success ? 'SMTP connection confirmed successfully!' : 'SMTP authentication failed.'),
+      };
+    }
+  } catch (err: any) {
+    console.warn('Backend SMTP test unavailable, falling back:', err);
+  }
+
   const latencyMs = Math.round(performance.now() - start);
 
-  // Check common validation errors
+  // Check common validation errors as fallback
   if (!server.host || server.host.trim() === '') {
     return { success: false, latencyMs, message: 'Invalid host address provided' };
   }
 
   if (server.port === 25 && !server.host.includes('dedicated') && !server.host.includes('postfix')) {
-    // Port 25 frequently blocked by consumer ISPs
     return { 
       success: false, 
       latencyMs, 

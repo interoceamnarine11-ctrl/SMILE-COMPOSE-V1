@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
+import nodemailer from "nodemailer";
 
 dotenv.config();
 
@@ -276,6 +277,199 @@ Respond with ONLY valid JSON adhering strictly to this schema:
     } catch (err: any) {
       console.error("Translation error:", err);
       res.status(500).json({ error: err.message || "Failed to translate email" });
+    }
+  });
+
+  // Alias for auto-translate-email
+  app.post("/api/auto-translate-email", async (req, res) => {
+    // Forward to /api/translate-email logic
+    try {
+      const { subject, body, bodyType, targetLanguage, companyName, recipientName } = req.body;
+      if (!subject || !body || !targetLanguage || targetLanguage.toLowerCase() === "english" || targetLanguage.toLowerCase() === "en") {
+        return res.json({ translatedSubject: subject, translatedBody: body, targetLanguage: targetLanguage || "English" });
+      }
+
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          const ai = getGenAI();
+          const prompt = `You are an enterprise multilingual email translator.
+Translate the following email Subject and Body from English to ${targetLanguage}.
+Keep all HTML tags, inline styles, CSS, links, and template placeholder variables (such as {{first_name}}, {{last_name}}, {{company}}, {{email}}, {{unsubscribe_url}}) EXACTLY intact.
+Ensure a formal, professional B2B business tone appropriate for a commercial organization in ${targetLanguage}.
+
+Company Name: ${companyName || 'the organization'}
+Recipient Name: ${recipientName || 'Executive'}
+
+Original Subject:
+${subject}
+
+Original Body (${bodyType || 'html'}):
+${body}
+
+Respond with ONLY valid JSON adhering strictly to this schema:
+{
+  "translatedSubject": "string",
+  "translatedBody": "string"
+}`;
+
+          const response = await ai.models.generateContent({
+            model: "gemini-3.8-flash",
+            contents: prompt,
+            config: { responseMimeType: "application/json" },
+          });
+
+          if (response.text) {
+            const parsed = JSON.parse(response.text);
+            return res.json({
+              translatedSubject: parsed.translatedSubject || subject,
+              translatedBody: parsed.translatedBody || body,
+              targetLanguage,
+            });
+          }
+        } catch (aiErr) {
+          console.warn("AI translation fallback:", aiErr);
+        }
+      }
+
+      return res.json({
+        translatedSubject: `[${targetLanguage}] ${subject}`,
+        translatedBody: body,
+        targetLanguage,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // API 3: Live Real SMTP Socket Verification (Checks credentials and TLS handshake with mail server)
+  app.post("/api/test-smtp", async (req, res) => {
+    const startTime = Date.now();
+    try {
+      const { host, port, username, password, security } = req.body;
+
+      if (!host || !port) {
+        return res.status(400).json({ success: false, message: "Host and port are required" });
+      }
+
+      const numPort = Number(port);
+      const isSecure = security === "SSL/TLS" || numPort === 465;
+
+      const transportConfig: any = {
+        host: host.trim(),
+        port: numPort,
+        secure: isSecure,
+        connectionTimeout: 10000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
+        tls: {
+          rejectUnauthorized: false, // Allows self-signed certificates or proxy relays
+        },
+      };
+
+      if (username) {
+        transportConfig.auth = {
+          user: username.trim(),
+          pass: password || "",
+        };
+      }
+
+      const transporter = nodemailer.createTransport(transportConfig);
+
+      // Verify connection configuration
+      await transporter.verify();
+      const latencyMs = Date.now() - startTime;
+
+      return res.json({
+        success: true,
+        latencyMs,
+        message: `Connected & authenticated successfully! TLS handshake OK with ${host}:${numPort} (${latencyMs}ms)`,
+      });
+    } catch (err: any) {
+      const latencyMs = Date.now() - startTime;
+      console.error("SMTP verify error:", err);
+      let errorMsg = err.message || "Failed to connect to SMTP server";
+
+      if (err.code === "EAUTH" || err.responseCode === 535) {
+        errorMsg = "Authentication failed: Invalid username or password (check app-specific password if using Gmail/Outlook)";
+      } else if (err.code === "ETIMEDOUT" || err.code === "ECONNRESET") {
+        errorMsg = `Connection timed out on ${req.body.host}:${req.body.port}. Check if port is open or blocked by cloud firewall`;
+      } else if (err.code === "ESOCKET") {
+        errorMsg = `SSL/TLS handshake negotiation failed on port ${req.body.port}. Try switching between STARTTLS (587) and SSL/TLS (465)`;
+      }
+
+      return res.status(200).json({
+        success: false,
+        latencyMs,
+        message: errorMsg,
+      });
+    }
+  });
+
+  // API 4: Live Real Email Delivery via SMTP
+  app.post("/api/send-email", async (req, res) => {
+    const startTime = Date.now();
+    try {
+      const { smtp, email } = req.body;
+
+      if (!smtp || !email) {
+        return res.status(400).json({ success: false, message: "SMTP configuration and email payload are required" });
+      }
+
+      const numPort = Number(smtp.port) || 587;
+      const isSecure = smtp.security === "SSL/TLS" || numPort === 465;
+
+      const transporter = nodemailer.createTransport({
+        host: smtp.host.trim(),
+        port: numPort,
+        secure: isSecure,
+        connectionTimeout: 15000,
+        tls: {
+          rejectUnauthorized: false,
+        },
+        auth: smtp.username
+          ? {
+              user: smtp.username.trim(),
+              pass: smtp.password || "",
+            }
+          : undefined,
+      });
+
+      const mailOptions: any = {
+        from: smtp.fromName
+          ? `"${smtp.fromName}" <${smtp.fromEmail || smtp.username}>`
+          : smtp.fromEmail || smtp.username,
+        to: email.to,
+        subject: email.subject,
+      };
+
+      if (email.bodyType === "html" || email.html) {
+        mailOptions.html = email.html || email.body;
+      } else {
+        mailOptions.text = email.body || email.text;
+      }
+
+      if (email.cc) mailOptions.cc = email.cc;
+      if (email.bcc) mailOptions.bcc = email.bcc;
+      if (email.replyTo) mailOptions.replyTo = email.replyTo;
+
+      const info = await transporter.sendMail(mailOptions);
+      const latencyMs = Date.now() - startTime;
+
+      return res.json({
+        success: true,
+        messageId: info.messageId,
+        response: info.response,
+        latencyMs,
+        message: `Delivered to ${email.to}: ${info.response || 'Message accepted by mail relay'}`,
+      });
+    } catch (err: any) {
+      const latencyMs = Date.now() - startTime;
+      console.error("Live email send error:", err);
+      return res.status(200).json({
+        success: false,
+        latencyMs,
+        message: err.message || "Failed to dispatch email via SMTP server",
+      });
     }
   });
 

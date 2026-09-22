@@ -22,7 +22,8 @@ import {
   Check,
   Radio,
   SlidersHorizontal,
-  Flame
+  Flame,
+  Edit2
 } from 'lucide-react';
 
 interface SmtpManagerProps {
@@ -40,6 +41,13 @@ export const SmtpManager: React.FC<SmtpManagerProps> = ({ servers, onUpdateServe
   const [autoTestIntervalSec, setAutoTestIntervalSec] = useState(30);
   const [lastAuditTimestamp, setLastAuditTimestamp] = useState<string>('Just now');
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  const showFeedback = (msg: string) => {
+    setFeedback(msg);
+    setTimeout(() => {
+      setFeedback(null);
+    }, 4000);
+  };
 
   // Single SMTP form state
   const [singleForm, setSingleForm] = useState<Partial<SmtpServer>>({
@@ -65,9 +73,114 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
   );
   const [bulkErrors, setBulkErrors] = useState<string[]>([]);
 
-  const showFeedback = (msg: string) => {
-    setFeedback(msg);
-    setTimeout(() => setFeedback(null), 3500);
+  // Auto-fill SMTP configuration from username/email domain
+  const handleAutoConfigureFromEmail = (inputEmailOrUser: string) => {
+    const trimmed = inputEmailOrUser.trim();
+    if (!trimmed.includes('@')) return;
+    const domain = trimmed.split('@')[1]?.toLowerCase().trim();
+    if (!domain) return;
+
+    let suggestedHost = '';
+    let suggestedPort = 587;
+    let suggestedSecurity: 'STARTTLS' | 'SSL/TLS' | 'NONE' = 'STARTTLS';
+
+    if (domain === 'gmail.com' || domain === 'googlemail.com') {
+      suggestedHost = 'smtp.gmail.com';
+      suggestedPort = 465;
+      suggestedSecurity = 'SSL/TLS';
+    } else if (domain === 'outlook.com' || domain === 'hotmail.com' || domain === 'live.com' || domain === 'office365.com') {
+      suggestedHost = 'smtp.office365.com';
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    } else if (domain === 'yahoo.com' || domain === 'ymail.com') {
+      suggestedHost = 'smtp.mail.yahoo.com';
+      suggestedPort = 465;
+      suggestedSecurity = 'SSL/TLS';
+    } else if (domain === 'icloud.com' || domain === 'me.com' || domain === 'mac.com') {
+      suggestedHost = 'smtp.mail.me.com';
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    } else if (domain === 'zoho.com') {
+      suggestedHost = 'smtppro.zoho.com';
+      suggestedPort = 465;
+      suggestedSecurity = 'SSL/TLS';
+    } else if (domain === 'mail.com') {
+      suggestedHost = 'smtp.mail.com';
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    } else if (domain === 'gmx.com' || domain === 'gmx.net') {
+      suggestedHost = 'mail.gmx.com';
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    } else if (domain.includes('sendgrid')) {
+      suggestedHost = 'smtp.sendgrid.net';
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    } else if (domain.includes('mailgun')) {
+      suggestedHost = 'smtp.mailgun.org';
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    } else if (domain.includes('postmark')) {
+      suggestedHost = 'smtp.postmarkapp.com';
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    } else {
+      // Standard corporate mail server convention
+      suggestedHost = `mail.${domain}`;
+      suggestedPort = 587;
+      suggestedSecurity = 'STARTTLS';
+    }
+
+    setSingleForm(prev => ({
+      ...prev,
+      username: trimmed,
+      fromEmail: prev.fromEmail && prev.fromEmail !== 'ops@company.com' ? prev.fromEmail : trimmed,
+      host: suggestedHost,
+      port: suggestedPort,
+      security: suggestedSecurity,
+      name: prev.name && prev.name !== 'Primary Outbound Relay' ? prev.name : `${domain.split('.')[0].toUpperCase()} Relay`,
+    }));
+  };
+
+  // Test credentials before adding to list
+  const [isPreTesting, setIsPreTesting] = useState(false);
+  const [preTestResult, setPreTestResult] = useState<{ success: boolean; message: string; latencyMs?: number } | null>(null);
+
+  const handlePreTestConnection = async () => {
+    if (!singleForm.host || !singleForm.username) {
+      setPreTestResult({ success: false, message: 'Please enter SMTP host and username before testing.' });
+      return;
+    }
+
+    setIsPreTesting(true);
+    setPreTestResult(null);
+
+    const testServer: SmtpServer = {
+      id: 'pre-test',
+      name: singleForm.name || 'Test Relay',
+      host: singleForm.host,
+      port: Number(singleForm.port) || 587,
+      username: singleForm.username,
+      password: singleForm.password || '',
+      security: singleForm.security || 'STARTTLS',
+      fromEmail: singleForm.fromEmail || singleForm.username,
+      fromName: singleForm.fromName || 'Outbound Mailer',
+      hourlyLimit: 1000,
+      dailyQuota: 10000,
+      sentToday: 0,
+      sentThisHour: 0,
+      status: 'active',
+      priority: 1,
+    };
+
+    try {
+      const res = await testSmtpConnection(testServer);
+      setPreTestResult(res);
+    } catch (err: any) {
+      setPreTestResult({ success: false, message: err.message || 'Connection failed' });
+    } finally {
+      setIsPreTesting(false);
+    }
   };
 
   // Test single server
@@ -158,9 +271,58 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
     return () => clearInterval(intervalId);
   }, [autoHealthTestEnabled, autoTestIntervalSec, servers.length]);
 
+  // Editing state for an existing server
+  const [editingServerId, setEditingServerId] = useState<string | null>(null);
+
+  const handleStartEditServer = (server: SmtpServer) => {
+    setEditingServerId(server.id);
+    setSingleForm({
+      name: server.name,
+      host: server.host,
+      port: server.port,
+      security: server.security,
+      username: server.username,
+      password: server.password,
+      fromEmail: server.fromEmail,
+      fromName: server.fromName,
+      hourlyLimit: server.hourlyLimit,
+      dailyQuota: server.dailyQuota,
+      priority: server.priority,
+    });
+    setPreTestResult(null);
+    setActiveTab('add_single');
+  };
+
   const handleAddSingle = (e: React.FormEvent) => {
     e.preventDefault();
     if (!singleForm.host || !singleForm.username) return;
+
+    if (editingServerId) {
+      const updated = servers.map(s => {
+        if (s.id === editingServerId) {
+          return {
+            ...s,
+            name: singleForm.name || s.name,
+            host: singleForm.host || s.host,
+            port: Number(singleForm.port) || s.port,
+            username: singleForm.username || s.username,
+            password: singleForm.password !== undefined ? singleForm.password : s.password,
+            security: singleForm.security || s.security,
+            fromEmail: singleForm.fromEmail || s.fromEmail,
+            fromName: singleForm.fromName || s.fromName,
+            hourlyLimit: Number(singleForm.hourlyLimit) || s.hourlyLimit,
+            dailyQuota: Number(singleForm.dailyQuota) || s.dailyQuota,
+            status: 'active' as const,
+          };
+        }
+        return s;
+      });
+      onUpdateServers(updated);
+      setEditingServerId(null);
+      setActiveTab('list');
+      showFeedback(`Updated relay ${singleForm.name} configuration.`);
+      return;
+    }
 
     const newServer: SmtpServer = {
       id: `smtp-${Date.now()}`,
@@ -388,6 +550,14 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
                       <td className="py-2.5 px-3 text-right">
                         <div className="flex items-center justify-end space-x-1.5">
                           <button
+                            onClick={() => handleStartEditServer(server)}
+                            className="p-1.5 bg-neutral-950 hover:bg-neutral-800 text-neutral-300 hover:text-emerald-400 rounded-lg text-xs transition-colors border border-neutral-800"
+                            title="Edit server configuration"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
                             onClick={() => handleTestServer(server)}
                             disabled={testingId === server.id}
                             className="p-1.5 bg-neutral-950 hover:bg-neutral-800 text-neutral-300 hover:text-white rounded-lg text-xs transition-colors border border-neutral-800"
@@ -417,10 +587,15 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
         {activeTab === 'add_single' && (
           <form onSubmit={handleAddSingle} className="p-6 overflow-y-auto space-y-4 max-w-2xl text-xs">
             <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
-              <h3 className="font-bold text-white text-sm">Add New SMTP Relay</h3>
+              <h3 className="font-bold text-white text-sm">
+                {editingServerId ? 'Edit SMTP Relay Configuration' : 'Add New SMTP Relay'}
+              </h3>
               <button
                 type="button"
-                onClick={() => setActiveTab('list')}
+                onClick={() => {
+                  setEditingServerId(null);
+                  setActiveTab('list');
+                }}
                 className="text-neutral-400 hover:text-white"
               >
                 Cancel
@@ -428,11 +603,41 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              <div className="sm:col-span-2 bg-neutral-950 p-3 rounded-lg border border-neutral-800">
+                <label className="block text-emerald-400 font-bold mb-1">
+                  1. SMTP Username or Email Address:
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={singleForm.username || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setSingleForm(prev => ({ ...prev, username: val }));
+                      handleAutoConfigureFromEmail(val);
+                    }}
+                    placeholder="e.g. interoceamnarine11@gmail.com or ops@enterprise.com"
+                    className="flex-1 bg-neutral-900 border border-neutral-700 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none font-mono text-xs"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleAutoConfigureFromEmail(singleForm.username || '')}
+                    className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-emerald-400 rounded-lg text-xs font-semibold whitespace-nowrap border border-neutral-700"
+                  >
+                    Auto-Detect Server
+                  </button>
+                </div>
+                <p className="text-[11px] text-neutral-400 mt-1">
+                  Typing your email automatically generates the optimal SMTP Server host, port, and TLS setting. You can edit any parameter below.
+                </p>
+              </div>
+
               <div>
                 <label className="block text-neutral-300 font-medium mb-1">Friendly Label / Name:</label>
                 <input
                   type="text"
-                  value={singleForm.name}
+                  value={singleForm.name || ''}
                   onChange={(e) => setSingleForm({ ...singleForm, name: e.target.value })}
                   placeholder="e.g. Primary Dedicated Relay"
                   className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none"
@@ -441,22 +646,24 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
               </div>
 
               <div>
-                <label className="block text-neutral-300 font-medium mb-1">SMTP Host (FQDN):</label>
+                <label className="block text-neutral-300 font-medium mb-1">
+                  SMTP Host (Auto-generated / Editable):
+                </label>
                 <input
                   type="text"
-                  value={singleForm.host}
+                  value={singleForm.host || ''}
                   onChange={(e) => setSingleForm({ ...singleForm, host: e.target.value })}
-                  placeholder="smtp.office365.com"
+                  placeholder="smtp.gmail.com"
                   className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none font-mono"
                   required
                 />
               </div>
 
               <div>
-                <label className="block text-neutral-300 font-medium mb-1">Port:</label>
+                <label className="block text-neutral-300 font-medium mb-1">Port (Editable):</label>
                 <input
                   type="number"
-                  value={singleForm.port}
+                  value={singleForm.port || 587}
                   onChange={(e) => setSingleForm({ ...singleForm, port: Number(e.target.value) })}
                   className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none font-mono"
                   required
@@ -466,44 +673,37 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
               <div>
                 <label className="block text-neutral-300 font-medium mb-1">Security / Encryption:</label>
                 <select
-                  value={singleForm.security}
+                  value={singleForm.security || 'STARTTLS'}
                   onChange={(e) => setSingleForm({ ...singleForm, security: e.target.value as any })}
                   className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none"
                 >
                   <option value="STARTTLS">STARTTLS (Port 587 recommended)</option>
-                  <option value="SSL/TLS">SSL/TLS (Port 465)</option>
+                  <option value="SSL/TLS">SSL/TLS (Port 465 recommended for Gmail/Yahoo)</option>
                   <option value="NONE">None / Plain (Port 25)</option>
                 </select>
               </div>
 
               <div>
-                <label className="block text-neutral-300 font-medium mb-1">SMTP Username / Auth ID:</label>
-                <input
-                  type="text"
-                  value={singleForm.username}
-                  onChange={(e) => setSingleForm({ ...singleForm, username: e.target.value })}
-                  placeholder="user@domain.com"
-                  className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none font-mono"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-neutral-300 font-medium mb-1">SMTP Password / API Token:</label>
+                <label className="block text-neutral-300 font-medium mb-1">
+                  SMTP Password or App Password:
+                </label>
                 <input
                   type="password"
-                  value={singleForm.password}
+                  value={singleForm.password || ''}
                   onChange={(e) => setSingleForm({ ...singleForm, password: e.target.value })}
                   placeholder="••••••••••••"
                   className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none font-mono"
                 />
+                <p className="text-[10px] text-neutral-500 mt-0.5">
+                  For Gmail / Google Workspace, use a 16-character Google App Password with 2FA.
+                </p>
               </div>
 
               <div>
                 <label className="block text-neutral-300 font-medium mb-1">Sender Email (From):</label>
                 <input
                   type="email"
-                  value={singleForm.fromEmail}
+                  value={singleForm.fromEmail || ''}
                   onChange={(e) => setSingleForm({ ...singleForm, fromEmail: e.target.value })}
                   placeholder="outbound@domain.com"
                   className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none font-mono"
@@ -515,7 +715,7 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
                 <label className="block text-neutral-300 font-medium mb-1">Sender Display Name:</label>
                 <input
                   type="text"
-                  value={singleForm.fromName}
+                  value={singleForm.fromName || ''}
                   onChange={(e) => setSingleForm({ ...singleForm, fromName: e.target.value })}
                   placeholder="e.g. Outreach Team"
                   className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-2.5 text-white focus:outline-none"
@@ -523,20 +723,65 @@ smtp.office365.com:587:connect@enterprise.com:m365-pass-token:STARTTLS:connect@e
               </div>
             </div>
 
-            <div className="flex justify-end space-x-2 pt-4">
+            {/* Pre-Test Result Alert */}
+            {preTestResult && (
+              <div className={`p-3 rounded-lg border text-xs flex items-start space-x-2 ${
+                preTestResult.success 
+                  ? 'bg-emerald-950/80 border-emerald-800 text-emerald-200' 
+                  : 'bg-rose-950/80 border-rose-800 text-rose-200'
+              }`}>
+                {preTestResult.success ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                )}
+                <div className="flex-1">
+                  <div className="font-bold">
+                    {preTestResult.success ? 'Handshake Passed & Verified!' : 'SMTP Connection Failed'}
+                  </div>
+                  <div className="text-[11px] mt-0.5 font-mono">{preTestResult.message}</div>
+                  {preTestResult.latencyMs && (
+                    <div className="text-[10px] opacity-75 mt-0.5">Latency: {preTestResult.latencyMs}ms</div>
+                  )}
+                  {!preTestResult.success && (
+                    <div className="text-[11px] text-rose-300 mt-1">
+                      You can edit the Host, Port, or Password above and test again until successful.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-4 border-t border-neutral-800">
+              {/* Test Button before adding */}
               <button
                 type="button"
-                onClick={() => setActiveTab('list')}
-                className="px-4 py-2 bg-neutral-950 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 rounded-lg"
+                onClick={handlePreTestConnection}
+                disabled={isPreTesting}
+                className="flex items-center space-x-1.5 px-4 py-2 bg-neutral-950 hover:bg-neutral-800 disabled:opacity-40 text-neutral-200 rounded-lg border border-neutral-700 font-semibold transition-colors"
               >
-                Cancel
+                <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isPreTesting ? 'animate-spin' : ''}`} />
+                <span>{isPreTesting ? 'Testing Handshake...' : 'Test SMTP Connection'}</span>
               </button>
-              <button
-                type="submit"
-                className="px-5 py-2 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold rounded-lg shadow-md"
-              >
-                Save &amp; Add Relay
-              </button>
+
+              <div className="flex space-x-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingServerId(null);
+                    setActiveTab('list');
+                  }}
+                  className="px-4 py-2 bg-neutral-950 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold rounded-lg shadow-md"
+                >
+                  {editingServerId ? 'Save Changes' : 'Save & Add Relay'}
+                </button>
+              </div>
             </div>
           </form>
         )}

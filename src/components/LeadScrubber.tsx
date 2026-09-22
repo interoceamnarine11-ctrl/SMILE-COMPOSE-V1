@@ -81,6 +81,9 @@ export const LeadScrubber: React.FC<LeadScrubberProps> = ({
         const q = searchQuery.toLowerCase();
         const matchesSearch = lead.email.toLowerCase().includes(q) || 
                               lead.domain.toLowerCase().includes(q) ||
+                              (lead.name && lead.name.toLowerCase().includes(q)) ||
+                              (lead.firstName && lead.firstName.toLowerCase().includes(q)) ||
+                              (lead.lastName && lead.lastName.toLowerCase().includes(q)) ||
                               (lead.company && lead.company.toLowerCase().includes(q)) ||
                               (lead.country && lead.country.toLowerCase().includes(q)) ||
                               (lead.targetLanguage && lead.targetLanguage.toLowerCase().includes(q));
@@ -386,13 +389,16 @@ export const LeadScrubber: React.FC<LeadScrubberProps> = ({
             <span className="text-xs font-bold text-white">Paste Emails (Comma or Newline Separated, or Name &lt;email&gt;)</span>
             <button onClick={() => setIsPasting(false)} className="text-xs text-neutral-400 hover:text-white">✕</button>
           </div>
+          <p className="text-[11px] text-neutral-400">
+            Names are automatically parsed from usernames (e.g. <span className="font-mono text-emerald-400">mladenka.pejic@</span> &rarr; <strong className="text-white">Mladenka Pejic</strong>, <span className="font-mono text-emerald-400">mladenka.p@</span> or <span className="font-mono text-emerald-400">mladenka@</span> &rarr; <strong className="text-white">Mladenka</strong>, capitalizes first letters, excludes single-letter initials).
+          </p>
           <textarea
             value={pasteInput}
             onChange={(e) => setPasteInput(e.target.value)}
             rows={4}
             placeholder="e.g.
-alex@cloudscale.io, sarah.lin@apexrobotics.de, elena.rostova@cyberdefense.ch
-sales@nexustechnology.co, info@quantumsoftware.eu"
+mladenka.pejic@adria-shipping.hr, mladenka.p@marine-cargo.eu, alex.turner@cloudscale.io
+elena.rostova@cyberdefense.ch, sales@nexustechnology.co"
             className="w-full bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-lg p-3 text-xs font-mono text-emerald-300 placeholder-neutral-500 focus:outline-none leading-relaxed"
           />
           <div className="flex justify-end gap-2">
@@ -631,7 +637,8 @@ sales@nexustechnology.co, info@quantumsoftware.eu"
                     title="Select All Visible"
                   />
                 </th>
-                <th className="py-3 px-3">Recipient / Email</th>
+                <th className="py-3 px-3">Analyzed Name (First &amp; Last)</th>
+                <th className="py-3 px-3">Email Address</th>
                 <th className="py-3 px-3">Company &amp; Impressum Contact</th>
                 <th className="py-3 px-3">Country &amp; Auto-Language</th>
                 <th className="py-3 px-3">Domain MX DNS Record</th>
@@ -641,7 +648,7 @@ sales@nexustechnology.co, info@quantumsoftware.eu"
             <tbody className="divide-y divide-neutral-800/60 bg-neutral-900">
               {displayedLeads.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-neutral-500">
+                  <td colSpan={7} className="py-12 text-center text-neutral-500">
                     No leads found matching criteria.
                   </td>
                 </tr>
@@ -662,10 +669,23 @@ sales@nexustechnology.co, info@quantumsoftware.eu"
                       />
                     </td>
 
+                    {/* Dedicated Name Column */}
                     <td className="py-2.5 px-3">
-                      <div className="font-mono text-white font-medium">{lead.email}</div>
+                      <div className="font-semibold text-white flex items-center gap-1.5">
+                        <span className="text-emerald-400 font-bold text-xs">{lead.name || 'Valued Executive'}</span>
+                      </div>
+                      <div className="text-[11px] text-neutral-400 mt-0.5 flex items-center gap-2">
+                        <span>First: <strong className="text-neutral-200">{lead.firstName || '—'}</strong></span>
+                        {lead.lastName && (
+                          <span>Last: <strong className="text-neutral-200">{lead.lastName}</strong></span>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* Email Column with badges */}
+                    <td className="py-2.5 px-3">
+                      <div className="font-mono text-emerald-300 font-medium">{lead.email}</div>
                       <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                        {lead.name && <span className="text-[11px] text-neutral-400">{lead.name}</span>}
                         {lead.isPublicWebmail && (
                           <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-800/80 font-mono">
                             Webmail ({lead.domain})

@@ -25,6 +25,8 @@ export interface LeadItem {
   id: string;
   email: string;
   name?: string;
+  firstName?: string;
+  lastName?: string;
   username: string;
   domain: string;
   company?: string;

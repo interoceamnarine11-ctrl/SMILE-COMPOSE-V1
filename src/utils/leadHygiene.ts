@@ -185,6 +185,91 @@ const DEAD_DOMAINS = new Set([
   'test',
 ]);
 
+/**
+ * Capitalizes the first letter of a word (e.g. "mladenka" -> "Mladenka")
+ */
+export function capitalizeWord(word: string): string {
+  if (!word) return '';
+  const clean = word.trim();
+  if (!clean) return '';
+  return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
+}
+
+/**
+ * Parses full first name and last name from an email username or address.
+ * Example:
+ *  "mladenka.pejic@" -> firstName: "Mladenka", lastName: "Pejic", fullName: "Mladenka Pejic"
+ *  "mladenka.p@" -> firstName: "Mladenka", lastName: undefined, fullName: "Mladenka" (skips single initial "p")
+ *  "mladenka@" -> firstName: "Mladenka", lastName: undefined, fullName: "Mladenka"
+ *  "p.mladenka@" -> firstName: "Mladenka", lastName: undefined, fullName: "Mladenka" (skips leading single initial)
+ *  "alex_turner" -> firstName: "Alex", lastName: "Turner", fullName: "Alex Turner"
+ */
+export function parseNameFromEmail(rawEmailOrUsername: string, existingName?: string): {
+  fullName: string;
+  firstName?: string;
+  lastName?: string;
+} {
+  // If an existing human name is provided (e.g. from Name <email>), format and use it
+  if (existingName && existingName.trim()) {
+    const rawTokens = existingName.trim().split(/\s+/).filter(t => t.length > 0);
+    const validTokens = rawTokens.filter(t => t.length > 1 && !/^\d+$/.test(t)).map(capitalizeWord);
+    if (validTokens.length > 0) {
+      const firstName = validTokens[0];
+      const lastName = validTokens.length > 1 ? validTokens.slice(1).join(' ') : undefined;
+      return {
+        fullName: validTokens.join(' '),
+        firstName,
+        lastName,
+      };
+    }
+  }
+
+  // Extract username before @
+  const localPart = (rawEmailOrUsername.includes('@') ? rawEmailOrUsername.split('@')[0] : rawEmailOrUsername).trim();
+  if (!localPart) return { fullName: '' };
+
+  // Remove trailing digits or plus-tags (e.g. john.doe+newsletter -> john.doe, alex99 -> alex)
+  const baseUsername = localPart.split('+')[0];
+
+  // Split on dots, underscores, hyphens
+  const tokens = baseUsername.split(/[._-]+/);
+
+  // Clean tokens: strip digits, keep only alphabetic parts
+  const cleanTokens: string[] = [];
+  for (const token of tokens) {
+    const lettersOnly = token.replace(/[^a-zA-Z]/g, '').trim();
+    // Rule: Filter out single letter abbreviations (e.g. .p or p.) unless no other name exists
+    if (lettersOnly.length > 1) {
+      cleanTokens.push(capitalizeWord(lettersOnly));
+    }
+  }
+
+  if (cleanTokens.length >= 2) {
+    const firstName = cleanTokens[0];
+    const lastName = cleanTokens.slice(1).join(' ');
+    return {
+      fullName: `${firstName} ${lastName}`,
+      firstName,
+      lastName,
+    };
+  } else if (cleanTokens.length === 1) {
+    return {
+      fullName: cleanTokens[0],
+      firstName: cleanTokens[0],
+      lastName: undefined,
+    };
+  }
+
+  // Fallback if token was single letter only: take alphabetic chars if available
+  const anyLetters = localPart.replace(/[^a-zA-Z]/g, '');
+  if (anyLetters.length > 0) {
+    const cap = capitalizeWord(anyLetters);
+    return { fullName: cap, firstName: cap };
+  }
+
+  return { fullName: localPart };
+}
+
 export function extractEmailAddress(raw: string): { email: string; name?: string } | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -317,6 +402,13 @@ export function analyzeLead(email: string, name?: string, company?: string): Lea
   const [username, domain] = trimmedEmail.split('@');
   const categoryTags: string[] = [];
 
+  // Parse intelligent first name and last name from email username or provided name
+  // Filters out abbreviations (e.g. mladenka.p -> Mladenka, mladenka.pejic -> Mladenka Pejic)
+  const parsedNames = parseNameFromEmail(trimmedEmail, name);
+  const resolvedName = parsedNames.fullName || name;
+  const firstName = parsedNames.firstName;
+  const lastName = parsedNames.lastName;
+
   // 1. Check Dead or Invalid Domains
   const isExplicitDead = DEAD_DOMAINS.has(domain) || domain.endsWith('.test') || domain.endsWith('.invalid');
   
@@ -394,7 +486,9 @@ export function analyzeLead(email: string, name?: string, company?: string): Lea
   return {
     id,
     email: trimmedEmail,
-    name,
+    name: resolvedName,
+    firstName,
+    lastName,
     username,
     domain,
     company: company || geoInfo.company || domain,
